@@ -2,7 +2,6 @@
 
 **Part 5 of a home network lab series.** Parts 1–4 built, segmented, domained, and *instrumented* the network — `holl.domain` already produces clean Security and Sysmon telemetry on every host. This part stands up a SIEM, forwards that telemetry into it, and uses it to **detect attacks**. Deliberate misconfigurations held back from Part 4 (a Kerberoastable service account, privilege creep, and more) are planted as detection targets, attacked from a Kali box, and caught with tuned detection searches mapped to MITRE ATT&CK. The goal is hands-on detection engineering and threat-hunting practice — the blue-team half of the lab.
 
-> **Status:** ✅ Complete — all seven phases done and verified. Each phase below documents what was done, with screenshots and verified results (same style as Parts 1–4), the status marker (⬜ pending / 🟡 in progress / ✅ complete), and per-phase troubleshooting logs.
 
 ---
 
