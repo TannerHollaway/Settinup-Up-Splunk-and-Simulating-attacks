@@ -78,12 +78,14 @@ Part 5 detects signal the domain is **already producing** — no new logging is 
 
 ---
 
+## Build Progress
+
+
 
  **Phase 1 — Stand up the SIEM** (Ubuntu VM in VirtualBox, install Splunk, apply Developer license, enable receiver on 9997)
  **Phase 2 — Ingestion pipeline** (Universal Forwarder on DC01/FS01/CLIENT01 + parsing add-ons; verify parsed events)
  **Phase 3 — Baseline & detection framework** (know-normal, naming/ATT&CK-tag convention, first detection on a benign trigger)
  **Phase 4 — Kerberoasting** (plant SPN service account, attack from Kali, crack offline, detect via 4769 + Sysmon)
- **Phase 5 — Privilege creep** (add user to privileged group, detect via 4728/4732/4756; pair with deny-logon GPO)
  **Phase 6 — Attack chain & threat hunt** (multi-stage emulation, per-stage detection, hypothesis-driven hunt + timeline)
  **Phase 7 — Tuning, coverage map & writeup** (false-positive tuning, ATT&CK Navigator heatmap, dashboards, final docs)
 
@@ -105,6 +107,7 @@ Part 5 detects signal the domain is **already producing** — no new logging is 
 **Result:** Ubuntu VM `siem` at `10.10.10.30/24` (VLAN 10); Splunk Enterprise 10 with the **Developer license** (10 GB/day) active; receiver listening on TCP **9997**.
 
 
+
 ![Splunk Enterprise web home on the SIEM host](screenshots/phase1-splunk-web-home.png)
 *Splunk Enterprise web UI up and running on the SIEM host.*
 
@@ -124,6 +127,7 @@ Part 5 detects signal the domain is **already producing** — no new logging is 
 - *(Enterprise touch / optional: deploy the forwarder via GPO, mirroring the Part 4 Sysmon deployment.)*
 
 **Verification (to confirm):** events from all three hosts searchable; Sysmon and Security fields extracted (host, user, process, command line, event code).
+
 
 
 **Result:** All three hosts forward Security + Sysmon Operational into `index=windows`, parsed by the add-ons. Verified six host/source combinations (DC01, FS01, CLIENT01 × `XmlWinEventLog:Security` + `XmlWinEventLog:Microsoft-Windows-Sysmon/Operational`).
@@ -156,9 +160,12 @@ renderXml = true
 | 2 | `stats count by host, sourcetype` showed only `XmlWinEventLog` — looked like Sysmon was missing | Not an error: `renderXml = true` gives all channels the unified `XmlWinEventLog` sourcetype; the channel lives in the `source` field. | Distinguished channels with `source` (`stats count by host, source`). |
 | 3 | FS01 + CLIENT01 forwarded Security but never Sysmon; `splunkd.log` showed `Could not subscribe to ... Microsoft-Windows-Sysmon/Operational ... errorCode=5` (Access Denied) | The forwarder ran under the restricted virtual account `NT SERVICE\SplunkForwarder`. Sysmon's Operational channel ACL grants read only to SYSTEM/Administrators, so the virtual account was denied; the Security channel allows broader read, which is why it worked. DC01 was unaffected — it runs as Local System. | Set the SplunkForwarder service to log on as **Local System** on both hosts and restarted. *(Least-privilege alternative logged for future hardening: grant the service account read on the Sysmon channel ACL instead of using Local System.)* |
 
-**📸 Screenshots:**
-- `index=windows | stats count by host, source` — six rows (3 hosts × Security + Sysmon)
-- A parsed Sysmon Event ID 1 and a parsed Security event showing extracted fields
+
+![Six sources verified across three hosts](screenshots/phase2-six-sources-verified.png)
+*`index=windows | stats count by host, source` — six rows: Security + Sysmon from DC01, FS01, and CLIENT01.*
+
+![Parsed Sysmon and Security events on DC01](screenshots/phase2-dc01-sysmon-working.png)
+*Sysmon Operational and Security channels parsing correctly with extracted fields.*
 
 ---
 
@@ -172,6 +179,7 @@ renderXml = true
 - Build one detection end to end on a **safe, self-triggered** signal — failed-logon brute force (**T1110**) — and validate it by generating the activity.
 
 **Verification (to confirm):** the brute-force alert triggers on the test activity, documented with its ATT&CK ID and tuning notes.
+
 
 
 **Result:** First detection live as a scheduled alert — `T1110 - Brute Force - Excessive Failed Logons` runs every 5 minutes and fired correctly on a simulated brute-force burst from CLIENT01 (8 failed logons against one account), landing in Triggered Alerts at High severity.
@@ -194,10 +202,12 @@ index=windows EventCode=4625
 
 > **Tuning note (deferred to Phase 7):** add throttling so a single ongoing incident doesn't re-fire every 5-minute cycle (alert storm). The threshold of 5 suits a quiet lab baseline (~0 organic failures); raise it in noisier environments.
 
-**📸 Screenshots:**
-- The final detection SPL with results (`TargetUserName=bruteforce_test`, source CLIENT01)
-- The alert definition (name, schedule, trigger condition)
-- The alert under Activity → Triggered Alerts
+
+![Brute-force detection isolating bruteforce_test](screenshots/phase3-bruteforce-detection.png)
+*The detection SPL isolating the brute-force account (`TargetUserName=bruteforce_test`, source CLIENT01).*
+
+![T1110 alert in Triggered Alerts](screenshots/phase3-triggered-alert-t1110.png)
+*The T1110 brute-force alert firing under Activity → Triggered Alerts.*
 
 ---
 
@@ -213,6 +223,7 @@ index=windows EventCode=4625
 **ATT&CK:** T1558.003 (Kerberoasting).
 **Verification (to confirm):** the 4769 request is visible; the detection search isolates it; the password is recovered offline (demonstrating the weak-credential risk). Note what is *not* visible — the offline crack happens on Kali and never touches the SIEM.
 
+attack chain verified and the Kerberoasting detection is live and fired in Triggered Alerts. (Optional RC4-downgrade detection via the `msDS-SupportedEncryptionTypes` change deferred — see Next Steps.)
 
 **What was done (attack chain — verified):**
 - Created the `ServiceAccounts` OU and the `svc_sql` user in **ADUC** (manual/GUI), set a weak password (`Password1`), and registered the SPN `MSSQLSvc/sql01.holl.domain:1433` via the **Attribute Editor** (`servicePrincipalName`). The SPN host need not exist — the KDC issues a ticket regardless.
@@ -246,10 +257,22 @@ index=windows EventCode=4769 TicketEncryptionType=0x17
 
 > **Security insight:** because the domain defaults to AES, an attacker must *downgrade* an account to RC4 to roast it the classic way — so the `msDS-SupportedEncryptionTypes` change is itself a detectable attack signal. This is the candidate second detection (pending decision).
 
-- ADUC Attribute Editor showing `servicePrincipalName` on svc_sql
-- Kali: `GetUserSPNs` output with the `$krb5tgs$23$*svc_sql$...` hash
-- Kali: hashcat recovering `Password1`
-- Splunk: the 4769 / `0x17` request for svc_sql, and the saved detection alert
+
+
+![SPN registered on svc_sql](screenshots/phase4-spn-svc-sql.png)
+*ADUC Attribute Editor — the `servicePrincipalName` planted on svc_sql.*
+
+![Kerberoast TGS hash captured](screenshots/phase4-kerberoast-hash.png)
+*Kali: `GetUserSPNs -request` returning the `$krb5tgs$23$*svc_sql$...` RC4 hash.*
+
+![hashcat cracking the hash](screenshots/phase4-hashcat-crack.png)
+*hashcat (mode 13100) recovering the weak password offline.*
+
+![4769 RC4 request in Splunk](screenshots/phase4-4769-rc4-splunk.png)
+*Splunk: the 4769 service-ticket request for svc_sql with `TicketEncryptionType=0x17` (RC4).*
+
+![Kerberoasting alert triggered](screenshots/phase4-triggered-alert-kerberoast.png)
+*The T1558.003 Kerberoasting alert firing in Triggered Alerts.*
 
 ---
 
@@ -263,10 +286,8 @@ index=windows EventCode=4769 TicketEncryptionType=0x17
 
 **ATT&CK:** T1098 (Account Manipulation), T1078.002 (Domain Accounts).
 **Verification (to confirm):** the group-modification event is alerted on; a `-adm` account logon on CLIENT01 is detected.
+ privilege-creep detection live; deny-logon control built and verified; paired Tier 0 logon-attempt detection live and firing in Triggered Alerts.
 
-
-
-**Part 1 — Privilege-creep detection 
 - Added a normal user (`ahernandez`, HR) to **Domain Admins** via ADUC → Member Of, firing **4728** against a zero-event baseline.
 - Detection covers all three group scopes (4728 global / 4732 domain-local / 4756 universal):
 ```spl
@@ -286,7 +307,7 @@ index=windows (EventCode=4728 OR EventCode=4732 OR EventCode=4756)
 - **Scoping rationale:** linking at `Departments` inherits to every `<Dept>/Computers` OU (where the workstations live); because these are Computer-Configuration rights they harmlessly ignore the `Users` OUs, and servers are unaffected (FS01 sits in `Lab → Servers → Tier1`, outside `Departments`).
 - **Verified:** logging into CLIENT01 as `jdoe-adm` is refused — *"The sign-in method you're trying to use isn't allowed."* A Domain Admin is now barred from the workstation, so its credentials can't be harvested there.
 
-**Part 2 detection — Tier 0 logon attempt on a workstation
+**Part 2 detection — Tier 0 logon attempt on a workstation (✅ done):**
 - A blocked Tier 0 logon surfaces as **4625** on the workstation with **`Status = 0xC000015B`** ("logon type not granted at this machine"). *Field note: the deny code lands in `Status`, not `SubStatus` (`SubStatus` was `0x0` / empty) — confirmed by reading the raw event rather than trusting the expected field.* Detection keys on the `Status` code, not the account name, so it catches any account denied by this control:
 ```spl
 index=windows EventCode=4625 Status=0xC000015B
@@ -303,11 +324,27 @@ index=windows EventCode=4625 Status=0xC000015B
 | 2 | Suspected clock skew was hiding recent events from the alert | Investigated with `skew_seconds = _indextime - _time` — measured **~15 s**, which is healthy, so skew was ruled out. | Confirmed the data path was fine; the issue was the search window, not timing. (Worth checking — real skew *would* silently break scheduled alerts.) |
 | 3 | First saved priv-creep alert only matched `EventCode=4728` and the title truncated to "Account Manipulation" | The simple single-event-ID search was saved instead of the full 3-scope detection; the title lost its ATT&CK ID. | Edited the alert's Search to the full 4728/4732/4756 query and restored the convention-compliant title. |
 
-**📸 Screenshots:**
-- ADUC Member Of showing the user added to Domain Admins; the 4728 in Splunk
-- The priv-creep detection result and the Triggered Alerts entry
-- `Tier0-Admins` group with `jdoe-adm`; the GPO's two Deny rights
-- The blocked-logon message on CLIENT01; the 4625 / SubStatus detection
+
+![ahernandez added to Domain Admins](screenshots/phase5-ahernandez-domain-admins.png)
+*ADUC Member Of — a normal HR user added to Domain Admins (the privilege creep).*
+
+![Privileged-group modification detection](screenshots/phase5-priv-creep-detection.png)
+*The 4728/4732/4756 detection: who added whom to which privileged group.*
+
+![Tier0-Admins membership](screenshots/phase5-tier0-group-membership.png)
+*The purpose-built `Tier0-Admins` group with `jdoe-adm` as a member.*
+
+![Deny-logon GPO rights](screenshots/phase5-deny-logon-gpo.png)
+*The deny-logon GPO: Deny log on locally + Deny log on through RDS, scoped to Tier0-Admins.*
+
+![Tier 0 logon blocked on CLIENT01](screenshots/phase5-logon-blocked.png)
+*The preventive control working — jdoe-adm refused logon on CLIENT01.*
+
+![Tier 0 logon-attempt detection](screenshots/phase5-tier0-logon-detection.png)
+*The paired detection: 4625 with `Status=0xC000015B` (denied logon right) on the workstation.*
+
+![Tier 0 alert triggered](screenshots/phase5-triggered-alert-tier0.png)
+*The T1078.002 alert firing in Triggered Alerts.*
 
 ---
 
@@ -324,7 +361,7 @@ index=windows EventCode=4625 Status=0xC000015B
 **ATT&CK:** T1087 / T1018 (discovery), T1558.003, T1021.002 / T1570 (lateral movement).
 **Verification (to confirm):** each stage detected; a reconstructed timeline; a written hunt with findings.
 
-
+four-stage intrusion executed, each stage detected, correlated into one timeline, then hunted down from behavior alone.
 
 **The narrative:** an attacker phishes `ahernandez` (HR user) — which, via the Phase 5 privilege creep, is now Domain Admin. The attacker uses it to recon, Kerberoast, and move laterally to FS01. Earlier-phase work becomes this attack's enabler.
 
@@ -365,9 +402,26 @@ index=windows EventCode=11 TargetFilename="C:\\Windows\\*.exe" TargetFilename!="
 | **Time/order scope** | Oldest-first over a wide window buried the attack under weeks-old account-setup events. | Match the window to the incident span and `sort -_time` so the relevant end is in front. |
 
 
-- The correlated attack timeline (recon → kerberoast → lateral movement, one actor)
-- The Stage 3 FP blowup (76 events) vs. the tuned result (psexec drops only)
-- The hunt: the user→host auth anomaly (`ahernandez` on FS01/DC01) and the final scoped attacker timeline incl. `svc_sql`
+![Recon — GetADUsers dumping the domain](screenshots/phase6-recon-getadusers.png)
+*Stage 1: `GetADUsers -all` enumerating every domain user from Kali.*
+
+![Anomalous NTLM detection](screenshots/phase6-ntlm-detection.png)
+*Stage 1 detection: the anomalous NTLM authentication (ahernandez from the Kali IP) — the recon footprint.*
+
+![PsExec lateral movement attempt](screenshots/phase6-psexec-attack.png)
+*Stage 3: `impacket-psexec` dropping its binary and creating a service on FS01 (caught mid-execution by Defender).*
+
+![False-positive blowup — 76 events](screenshots/phase6-timeline-fp-blowup.png)
+*Detection tuning: the over-broad `C:\Windows\*.exe` rule matching 76 events, ~75 of them benign Windows servicing.*
+
+![Correlated attack timeline](screenshots/phase6-attack-timeline.png)
+*Stage 4: the three detections correlated into one timeline — recon → Kerberoast → lateral movement, one actor.*
+
+![Hunt — user/host authentication anomaly](screenshots/phase6-hunt-auth-anomaly.png)
+*The hunt: an HR user (ahernandez) authenticating to FS01 and DC01 from the Kali IP — lateral movement seen as an access anomaly.*
+
+![Hunt — final scoped attacker timeline](screenshots/phase6-hunt-final-timeline.png)
+*The hunt's payoff: the full attacker timeline on the targeted hosts, svc_sql Kerberoast included.*
 
 ---
 
@@ -387,16 +441,23 @@ index=windows EventCode=11 TargetFilename="C:\\Windows\\*.exe" TargetFilename!="
 
 **Verification (to confirm):** detections survive a clean baseline without firing; Navigator heatmap reflects covered techniques.
 
-
+noisy alerts throttled, ATT&CK coverage layer built, SOC dashboard live.
 
 **What was done:**
 - **Tuning:** added **throttling** to the two storm-prone alerts — Kerberoasting (suppress 60 min by `ServiceName`) and Anomalous NTLM (suppress 60 min by `TargetUserName`) — so repeats of the *same* signal are suppressed while a *new* victim still alerts. The Stage 6 false-positive blowup (76 events → only genuine psexec drops, after scoping to the Windows root) is the documented before/after.
 - **ATT&CK coverage:** `attack-navigator-coverage.json` — a Navigator layer highlighting the six validated detections across Credential Access, Persistence, Privilege Escalation, Discovery, and Lateral Movement. Each cell's tooltip records the alert, data source, validation, and phase. (Import note: decline the version-upgrade prompt to preserve the layer's colors/annotations.)
 - **SOC dashboard:** `SOC - holl.domain Detection Overview` (Classic / Simple XML) — five panels: triggered detections, failed-logon brute-force watch, RC4 Kerberoast watch, privileged-group changes, and anomalous-NTLM watch. The single operational pane.
 
-- The ATT&CK Navigator heatmap (six techniques lit)
-- The SOC dashboard (all panels populated)
-- A throttle config; the Stage 6 FP before/after
+**📸 Screenshots:**
+
+![ATT&CK Navigator coverage heatmap](screenshots/phase7-attack-navigator-coverage.png)
+*The ATT&CK Navigator coverage layer — six validated detections lit across the matrix.*
+
+![SOC dashboard](screenshots/phase7-soc-dashboard.png)
+*The `SOC - holl.domain Detection Overview` dashboard — five panels, all populated.*
+
+![Alert throttle configuration](screenshots/phase7-throttle-config.png)
+*Tuning: throttling on the Kerberoasting alert (suppress repeats by `ServiceName`).*
 
 ---
 
@@ -442,7 +503,7 @@ Part 5 turned the instrumented-but-passive `holl.domain` of Part 4 into a workin
 
 **What the build deliberately surfaced (not glossed over):** the `user`-vs-`TargetUserName` field reliability trap; a forwarder Access-Denied on the Sysmon channel (virtual-account ACL); the AD-recon visibility gap (4662 unlogged / TA-filtered); default Defender catching off-the-shelf Impacket across psexec/wmiexec/smbexec; a brittle signature-vs-behavior detection rewrite; a 76-event false-positive blowup and its scoping fix; and the three hunt scoping traps (field, volume, time/order). Each is documented with cause and resolution — the troubleshooting and tuning narrative is as much the deliverable as the detections themselves.
 
-**Skills evidenced:** SIEM deployment and log-pipeline engineering, SPL detection authoring and tuning, MITRE ATT&CK mapping, adversary emulation (Impacket / Rubeus / hashcat), incident correlation and timeline reconstruction, hypothesis-driven threat hunting, and honest detection-engineering judgment about coverage gaps and tool limitations.
+**Skills evidenced:** SIEM deployment and log-pipeline engineering, SPL detection authoring and tuning, MITRE ATT&CK mapping, adversary emulation (Impacket / Rubeus / hashcat), incident correlation and timeline reconstruction, hypothesis-driven threat hunting, and detection-engineering judgment about coverage gaps and tool limitations.
 
 ## Next Steps
 
